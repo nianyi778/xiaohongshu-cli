@@ -61,3 +61,7 @@ check_untyped_defs = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = "-m 'not smoke'"
+markers = [
+    "smoke: real-API integration tests (run with: pytest -m smoke)",
+]
