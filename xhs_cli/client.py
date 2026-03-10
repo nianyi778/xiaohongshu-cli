@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from .constants import CREATOR_HOST, EDITH_HOST, HOME_URL, UPLOAD_HOST, USER_AGENT
+from .constants import CHROME_VERSION, CREATOR_HOST, EDITH_HOST, HOME_URL, UPLOAD_HOST, USER_AGENT
 from .cookies import cookies_to_string
 from .creator_signing import sign_creator
 from .exceptions import (
@@ -60,8 +60,11 @@ class XhsClient:
         self.cookies = cookies
         self._http = httpx.Client(timeout=timeout, follow_redirects=True)
         self._request_delay = request_delay
+        self._base_request_delay = request_delay
         self._max_retries = max_retries
         self._last_request_time = 0.0
+        self._verify_count = 0  # NeedVerify cooldown tracker
+        self._request_count = 0  # Total requests in session
 
     def close(self) -> None:
         self._http.close()
@@ -73,18 +76,24 @@ class XhsClient:
         self.close()
 
     def _rate_limit_delay(self) -> None:
-        """Enforce minimum delay between consecutive requests to avoid rate limiting."""
+        """Enforce minimum delay with Gaussian jitter to mimic human browsing."""
         if self._request_delay <= 0:
             return
         elapsed = time.time() - self._last_request_time
         if elapsed < self._request_delay:
-            sleep_time = self._request_delay - elapsed + random.uniform(0, 0.5)
+            # Truncated Gaussian jitter — more natural than uniform
+            jitter = max(0, random.gauss(0.3, 0.15))
+            # ~5% chance of a longer pause (simulates reading/thinking)
+            if random.random() < 0.05:
+                jitter += random.uniform(2.0, 5.0)
+            sleep_time = self._request_delay - elapsed + jitter
             logger.debug("Rate-limit delay: %.2fs", sleep_time)
             time.sleep(sleep_time)
 
     def _mark_request(self) -> None:
         """Record timestamp of last request."""
         self._last_request_time = time.time()
+        self._request_count += 1
 
     def _base_headers(self) -> dict[str, str]:
         return {
@@ -93,24 +102,42 @@ class XhsClient:
             "cookie": cookies_to_string(self.cookies),
             "origin": HOME_URL,
             "referer": f"{HOME_URL}/",
-            # Anti-detection: browser-like sec-ch-ua headers
-            "sec-ch-ua": '"Chromium";v="142", "Microsoft Edge";v="142", "Not:A-Brand";v="24"',
+            # Anti-detection: must match UA (macOS Chrome)
+            "sec-ch-ua": f'"Chromium";v="{CHROME_VERSION}", "Google Chrome";v="{CHROME_VERSION}", "Not-A.Brand";v="8"',
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-platform": '"macOS"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-site",
             "accept": "application/json, text/plain, */*",
             "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "dnt": "1",
+            "priority": "u=1, i",
         }
 
     def _handle_response(self, resp: httpx.Response) -> Any:
-        """Handle API response, raising appropriate errors."""
+        """Handle API response, raising appropriate errors.
+
+        NeedVerify cooldown: on first captcha trigger, increase request delay
+        and sleep to reduce risk. After 3 consecutive triggers, give up.
+        """
         if resp.status_code in (461, 471):
+            self._verify_count += 1
+            cooldown = min(30, 5 * (2 ** (self._verify_count - 1)))  # 5s, 10s, 20s, 30s cap
+            logger.warning(
+                "Captcha triggered (count=%d), cooling down %.0fs before raising",
+                self._verify_count, cooldown,
+            )
+            # Permanently increase delay after captcha
+            self._request_delay = max(self._request_delay, self._base_request_delay * 2)
+            time.sleep(cooldown)
             raise NeedVerifyError(
                 verify_type=resp.headers.get("verifytype", "unknown"),
                 verify_uuid=resp.headers.get("verifyuuid", "unknown"),
             )
+
+        # Successful request resets verify counter
+        self._verify_count = 0
 
         text = resp.text
         if not text:
@@ -364,6 +391,46 @@ class XhsClient:
             "image_formats": "jpg,webp,avif",
             "xsec_token": xsec_token,
         })
+
+    def get_all_comments(
+        self,
+        note_id: str,
+        xsec_token: str = "",
+        max_pages: int = 20,
+    ) -> dict[str, Any]:
+        """Get ALL comments for a note by auto-paginating.
+
+        Returns a merged response with all comments concatenated.
+        Stops when has_more is False or max_pages reached.
+        """
+        all_comments: list[dict[str, Any]] = []
+        cursor = ""
+        pages = 0
+
+        while pages < max_pages:
+            data = self.get_comments(note_id, cursor=cursor, xsec_token=xsec_token)
+            if not isinstance(data, dict):
+                break
+
+            comments = data.get("comments", [])
+            all_comments.extend(comments)
+            pages += 1
+
+            has_more = data.get("has_more", False)
+            next_cursor = data.get("cursor", "")
+            if not has_more or not next_cursor:
+                break
+            cursor = next_cursor
+            logger.debug("Comments page %d fetched, %d so far", pages, len(all_comments))
+
+        # Return merged result
+        return {
+            "comments": all_comments,
+            "has_more": False,
+            "cursor": "",
+            "total_fetched": len(all_comments),
+            "pages_fetched": pages,
+        }
 
     def get_sub_comments(
         self,

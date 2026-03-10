@@ -88,21 +88,30 @@ def read(ctx, id_or_url: str, xsec_token: str, as_json: bool, as_yaml: bool):
 @click.argument("id_or_url")
 @click.option("--cursor", default="", help="Pagination cursor")
 @click.option("--xsec-token", default="", help="Security token")
+@click.option("--all", "fetch_all", is_flag=True, help="Auto-paginate to fetch ALL comments")
 @structured_output_options
 @click.pass_context
-def comments(ctx, id_or_url: str, cursor: str, xsec_token: str, as_json: bool, as_yaml: bool):
-    """View comments on a note."""
+def comments(ctx, id_or_url: str, cursor: str, xsec_token: str, fetch_all: bool, as_json: bool, as_yaml: bool):
+    """View comments on a note. Use --all to fetch all pages."""
     note_id, url_token = parse_note_url(id_or_url)
     token = xsec_token or url_token
 
     try:
-        data = run_client_action(
-            ctx,
-            lambda client: client.get_comments(note_id, cursor=cursor, xsec_token=token),
-        )
+        if fetch_all:
+            data = run_client_action(
+                ctx,
+                lambda client: client.get_all_comments(note_id, xsec_token=token),
+            )
+        else:
+            data = run_client_action(
+                ctx,
+                lambda client: client.get_comments(note_id, cursor=cursor, xsec_token=token),
+            )
 
         if not maybe_print_structured(data, as_json=as_json, as_yaml=as_yaml):
             render_comments(data)
+            if fetch_all and isinstance(data, dict):
+                print_info(f"Fetched {data.get('total_fetched', 0)} comments across {data.get('pages_fetched', 0)} pages")
 
     except Exception as exc:
         exit_for_error(exc, as_json=as_json, as_yaml=as_yaml)

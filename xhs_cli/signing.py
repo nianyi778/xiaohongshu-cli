@@ -21,7 +21,7 @@ import struct
 import time
 from typing import Any
 
-from .constants import APP_ID, PLATFORM, SDK_VERSION, USER_AGENT
+from .constants import APP_ID, CHROME_VERSION, PLATFORM, SDK_VERSION, USER_AGENT
 
 # ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -80,23 +80,30 @@ SIGNATURE_DATA_TEMPLATE = {
     "x4": "",
 }
 
-# GPU vendors for fingerprint
+# GPU vendors for fingerprint — macOS-appropriate entries
 GPU_VENDORS = [
-    "Google Inc. (NVIDIA)|ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB Direct3D11 vs_5_0 ps_5_0, D3D11)",
-    "Google Inc. (NVIDIA)|ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-    "Google Inc. (NVIDIA)|ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-    "Google Inc. (NVIDIA)|ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-    "Google Inc. (Intel)|ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
-    "Google Inc. (AMD)|ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "Apple|Apple M1",
+    "Apple|Apple M1 Pro",
+    "Apple|Apple M1 Max",
+    "Apple|Apple M2",
+    "Apple|Apple M2 Pro",
+    "Apple|Apple M3",
+    "Apple|Apple M3 Pro",
+    "Google Inc. (Intel)|ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics 655 OpenGL Engine)",
+    "Google Inc. (Intel)|ANGLE (Intel, Intel(R) UHD Graphics 630 OpenGL Engine)",
+    "Google Inc. (AMD)|ANGLE (AMD, AMD Radeon Pro 5500M OpenGL Engine)",
 ]
 
+# macOS-typical screen resolutions (Retina-heavy)
 SCREEN_RESOLUTIONS = [
-    ("1920;1080", 0.45),
-    ("2560;1440", 0.20),
-    ("1366;768", 0.15),
-    ("1536;864", 0.10),
-    ("3840;2160", 0.05),
-    ("1440;900", 0.05),
+    ("2560;1600", 0.30),  # MacBook Pro 14"
+    ("3024;1964", 0.15),  # MacBook Pro 14" Retina
+    ("3456;2234", 0.10),  # MacBook Pro 16" Retina
+    ("2560;1440", 0.15),  # External display
+    ("1920;1080", 0.10),  # External display
+    ("1440;900",  0.10),  # MacBook Air 13"
+    ("2880;1800", 0.05),  # Older MacBook Pro Retina
+    ("5120;2880", 0.05),  # Apple Studio Display
 ]
 
 FINGERPRINT_PLUGINS = (
@@ -439,7 +446,7 @@ def _generate_fingerprint(cookies: dict[str, str], user_agent: str) -> dict[str,
         "x16": "false",
         "x17": "false",
         "x18": "un",
-        "x19": "Win32",
+        "x19": "MacIntel",
         "x20": "",
         "x21": FINGERPRINT_PLUGINS,
         "x22": webgl_hash,
@@ -495,7 +502,7 @@ def _generate_fingerprint(cookies: dict[str, str], user_agent: str) -> dict[str,
         "x72": "complete",
         "x73": "1191",
         "x74": "0|0|0",
-        "x75": "Google Inc.",
+        "x75": "Apple Inc.",
         "x76": "true",
         "x77": "1|1|1|1|1|1|1|1|1|1",
         "x78": {
@@ -607,6 +614,30 @@ def extract_uri(url: str) -> str:
 
 # ─── Public API ─────────────────────────────────────────────────────────────
 
+# ─── Session Fingerprint Cache ──────────────────────────────────────────────
+# A real browser keeps the same fingerprint for the entire session.
+# We cache (fingerprint, b1, x9) keyed by a1, only regenerating when the
+# cookie identity changes.
+
+_session_fp_cache: dict[str, tuple[dict[str, Any], str, int]] = {}
+
+
+def _get_session_fingerprint(cookies: dict[str, str]) -> tuple[dict[str, Any], str, int]:
+    """Return (fingerprint, b1, x9), cached per a1 cookie value."""
+    a1 = cookies.get("a1", "")
+    if a1 in _session_fp_cache:
+        fp, b1, x9 = _session_fp_cache[a1]
+        # Update x44 (timestamp) — this changes per request in real browsers
+        fp["x44"] = str(int(time.time() * 1000))
+        return fp, b1, x9
+
+    fp = _generate_fingerprint(cookies, USER_AGENT)
+    b1 = _generate_b1(fp)
+    x9 = _crc32_js_int(b1)
+    _session_fp_cache[a1] = (fp, b1, x9)
+    return fp, b1, x9
+
+
 def sign_main_api(
     method: str,
     uri: str,
@@ -648,10 +679,8 @@ def sign_main_api(
     signature_json = json.dumps(signature_data, separators=(",", ":"))
     xs = XYS_PREFIX + _custom_base64_encode(signature_json)
 
-    # Build x-s-common
-    fingerprint = _generate_fingerprint(cookies, USER_AGENT)
-    b1 = _generate_b1(fingerprint)
-    x9 = _crc32_js_int(b1)
+    # Build x-s-common — uses session-cached fingerprint
+    _fp, b1, x9 = _get_session_fingerprint(cookies)
     xs_common_struct = dict(XSCOMMON_TEMPLATE)
     xs_common_struct["x5"] = a1
     xs_common_struct["x8"] = b1
