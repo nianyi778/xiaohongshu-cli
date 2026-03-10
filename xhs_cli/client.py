@@ -594,6 +594,22 @@ class XhsClient:
             "num": 30,
         })
 
+    def get_user_following(self, user_id: str, page: int = 1) -> dict[str, Any]:
+        """Get a user's following list."""
+        return self._main_api_get("/api/sns/web/v1/user/following", {
+            "user_id": user_id,
+            "page": page,
+            "page_size": 20,
+        })
+
+    def get_user_followers(self, user_id: str, page: int = 1) -> dict[str, Any]:
+        """Get a user's followers list."""
+        return self._main_api_get("/api/sns/web/v1/user/followers", {
+            "user_id": user_id,
+            "page": page,
+            "page_size": 20,
+        })
+
     # ─── P1: Notification Endpoints (reverse-engineered) ─────────────────
 
     def get_unread_count(self) -> dict[str, Any]:

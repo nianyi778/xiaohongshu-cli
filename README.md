@@ -83,9 +83,14 @@ xhs hot -c fashion                    # Categories: fashion, food, cosmetics,
                                       #   travel, fitness
 
 # ─── Social ───────────────────────────────────────
-xhs favorites <user_id>                # User's bookmarked notes
-xhs follow <user_id>                  # Follow a user
-xhs unfollow <user_id>                # Unfollow a user
+xhs favorites                          # My bookmarked notes (current user)
+xhs favorites <user_id>                # Other user's bookmarked notes
+xhs following                          # My following list
+xhs following <user_id> --page 2       # Other user's following, page 2
+xhs followers                          # My followers list
+xhs followers <user_id>                # Other user's followers
+xhs follow <user_id>                   # Follow a user
+xhs unfollow <user_id>                 # Unfollow a user
 
 # ─── Interactions ─────────────────────────────────
 xhs like <note_id>                     # Like a note
@@ -309,11 +314,15 @@ xhs user-posts <user_id>              # 用户发布的笔记
 xhs feed                              # 推荐 Feed
 xhs hot -c food                       # 热门笔记（按分类）
 
-# 互动
-xhs like <note_id>                     # 点赞
-xhs favorite <note_id>                 # 收藏
-xhs comment <note_id> -c "好赞！"      # 评论
+# 社交
+xhs favorites                          # 我的收藏
+xhs favorites <user_id>                # 其他用户的收藏
+xhs following                          # 我的关注列表
+xhs following <user_id>                # 其他用户的关注列表
+xhs followers                          # 我的粉丝列表
+xhs followers <user_id>                # 其他用户的粉丝列表
 xhs follow <user_id>                   # 关注
+xhs unfollow <user_id>                 # 取消关注
 
 # 创作者
 xhs my-notes                           # 我的笔记列表
