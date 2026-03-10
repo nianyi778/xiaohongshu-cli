@@ -86,8 +86,6 @@ cli.add_command(interactions.delete_comment)
 cli.add_command(social.follow)
 cli.add_command(social.unfollow)
 cli.add_command(social.favorites)
-cli.add_command(social.following)
-cli.add_command(social.followers)
 
 # ─── Creator commands ───────────────────────────────────────────────────────
 
