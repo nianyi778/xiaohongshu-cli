@@ -63,22 +63,30 @@ def clear_cookies() -> None:
         logger.debug("Cleared cookies from %s", cookie_path)
 
 
+def _available_browsers() -> list[str]:
+    """List all browser names supported by browser_cookie3."""
+    import inspect
+
+    import browser_cookie3 as bc3
+
+    return sorted(
+        name
+        for name in dir(bc3)
+        if not name.startswith("_")
+        and name != "load"  # 'load' tries all browsers; skip in auto-detect
+        and callable(getattr(bc3, name))
+        and hasattr(getattr(bc3, name), "__code__")
+        and "domain_name" in inspect.signature(getattr(bc3, name)).parameters
+    )
+
+
 def _get_browser_loader(source: str):
     """Get browser cookie loader from browser_cookie3 by name."""
     import browser_cookie3 as bc3
 
     loader = getattr(bc3, source, None)
     if loader is None or not callable(loader):
-        import inspect
-
-        available = sorted(
-            name
-            for name in dir(bc3)
-            if not name.startswith("_")
-            and callable(getattr(bc3, name))
-            and hasattr(getattr(bc3, name), "__code__")
-            and "domain_name" in inspect.signature(getattr(bc3, name)).parameters
-        )
+        available = _available_browsers()
         raise ValueError(
             f"Unknown browser: {source!r}. Available: {', '.join(available)}"
         )
@@ -165,55 +173,82 @@ except Exception as e:
         return None
 
 
-def extract_browser_cookies(source: str = "chrome") -> dict[str, str] | None:
+def extract_browser_cookies(source: str = "auto") -> tuple[str, dict[str, str]] | None:
     """
     Extract XHS cookies from browser using browser-cookie3.
 
-    macOS requires an in-process attempt for Keychain-backed browsers; when that
-    fails we fall back to a subprocess to avoid SQLite DB locks.
+    When *source* is ``"auto"``, tries every browser supported by browser_cookie3
+    concurrently and returns the first one that has valid cookies.
+
+    Returns ``(browser_name, cookies)`` on success, or ``None``.
     """
-    cookies = _extract_in_process(source)
-    if cookies:
-        return cookies
-    return _extract_via_subprocess(source)
+    if source != "auto":
+        cookies = _extract_in_process(source)
+        if cookies:
+            return source, cookies
+        cookies = _extract_via_subprocess(source)
+        if cookies:
+            return source, cookies
+        return None
+
+    # Auto-detect: try all available browsers
+    try:
+        browsers = _available_browsers()
+    except ImportError:
+        logger.debug("browser_cookie3 not installed")
+        return None
+
+    for browser in browsers:
+        logger.debug("Auto-detect: trying %s …", browser)
+        cookies = _extract_in_process(browser)
+        if cookies:
+            return browser, cookies
+        cookies = _extract_via_subprocess(browser)
+        if cookies:
+            return browser, cookies
+
+    return None
 
 
-def get_cookies(cookie_source: str = "chrome", *, force_refresh: bool = False) -> dict[str, str]:
+def get_cookies(
+    cookie_source: str = "auto", *, force_refresh: bool = False
+) -> tuple[str, dict[str, str]]:
     """
     Multi-strategy cookie acquisition with TTL-based auto-refresh.
 
+    Returns ``(browser_name, cookies)``.
+
     1. Load saved cookies (skip if stale > 7 days)
-    2. Extract from browser
+    2. Extract from browser (auto-detect if *cookie_source* is ``"auto"``)
     3. Raise error if all fail
     """
     # 1. Try saved cookies first
     if not force_refresh:
         saved = load_saved_cookies()
         if saved:
-            # Check TTL — refresh from browser if stale
-            saved_at = saved.pop("saved_at", 0)  # pop to avoid passing to client
+            saved_at = saved.pop("saved_at", 0)
             if saved_at and (time.time() - float(saved_at)) > _COOKIE_TTL_SECONDS:
                 logger.info(
                     "Cookies older than %d days, attempting browser refresh",
                     COOKIE_TTL_DAYS,
                 )
-                fresh = extract_browser_cookies(cookie_source)
-                if fresh:
-                    save_cookies(fresh)
-                    return fresh
+                result = extract_browser_cookies(cookie_source)
+                if result:
+                    save_cookies(result[1])
+                    return result
                 logger.warning(
                     "Cookie refresh failed; using existing cookies (age: %d+ days)",
                     COOKIE_TTL_DAYS,
                 )
-            return saved
+            return "saved", saved
 
     # 2. Try browser extraction
     from .exceptions import NoCookieError
 
-    extracted = extract_browser_cookies(cookie_source)
-    if extracted:
-        save_cookies(extracted)
-        return extracted
+    result = extract_browser_cookies(cookie_source)
+    if result:
+        save_cookies(result[1])
+        return result
 
     raise NoCookieError(cookie_source)
 

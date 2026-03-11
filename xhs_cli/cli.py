@@ -33,9 +33,9 @@ from .commands import auth, creator, interactions, reading, social
 @click.option(
     "--cookie-source",
     type=str,
-    default="chrome",
+    default="auto",
     show_default=True,
-    help="Browser to read cookies from",
+    help="Browser to read cookies from (auto = try all installed browsers)",
 )
 @click.pass_context
 def cli(ctx, verbose: bool, cookie_source: str):
