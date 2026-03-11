@@ -119,12 +119,11 @@ xhs notifications --type connections   # 新增关注 notifications
 xiaohongshu-cli uses a 2-tier authentication strategy:
 
 1. **Saved cookies** — loads from `~/.xiaohongshu-cli/cookies.json`
-2. **Browser cookies** — auto-extracts from Chrome, Firefox, Safari, Edge, Brave
+2. **Browser cookies** — auto-detects installed browsers and extracts cookies (supports Chrome, Arc, Edge, Firefox, Safari, Brave, Chromium, Opera, Vivaldi, and more)
 
-`xhs login` always refreshes cookies from the selected browser and overwrites the local cache.
+`xhs login` automatically tries all installed browsers and uses the first one with valid cookies.
+Use `--cookie-source <browser>` to specify a browser explicitly.
 Other authenticated commands automatically retry once with fresh browser cookies when the saved session has expired.
-
-Most commands require authentication. Use `--cookie-source` to specify browser (default: chrome; also supports firefox, edge, safari, brave).
 
 ### Cookie TTL
 
@@ -241,9 +240,9 @@ uv run ruff check .
 
 **Q: `NoCookieError: No 'a1' cookie found`**
 
-1. Open Chrome/Edge and visit https://www.xiaohongshu.com/
+1. Open any browser and visit https://www.xiaohongshu.com/
 2. Log in with your account
-3. Run `xhs login --cookie-source chrome`
+3. Run `xhs login` (auto-detects browser) or `xhs login --cookie-source <browser>`
 
 **Q: `NeedVerifyError: Captcha required`**
 
@@ -367,15 +366,15 @@ xhs notifications --type connections   # 新增关注通知
 xiaohongshu-cli 采用两级认证策略：
 
 1. **已保存 Cookie** — 从 `~/.xiaohongshu-cli/cookies.json` 加载
-2. **浏览器 Cookie** — 自动从 Chrome、Firefox、Safari、Edge、Brave 提取
+2. **浏览器 Cookie** — 自动检测已安装浏览器并提取（支持 Chrome、Arc、Edge、Firefox、Safari、Brave、Chromium、Opera、Vivaldi 等）
 
 Cookie 保存后有效期 **7 天**，超时后自动尝试从浏览器刷新。
 
-`xhs login` 会强制从浏览器重新提取并覆盖本地缓存。其他需认证命令在 session 过期时会自动重试一次。
+`xhs login` 会自动尝试所有已安装浏览器，使用第一个有有效 Cookie 的浏览器。也可用 `--cookie-source <browser>` 指定浏览器。其他需认证命令在 session 过期时会自动重试一次。
 
 ## 常见问题
 
-- `NoCookieError: No 'a1' cookie found` — 请先在 Chrome/Edge 打开 https://www.xiaohongshu.com/ 并登录，然后执行 `xhs login`
+- `NoCookieError: No 'a1' cookie found` — 请先在任意浏览器打开 https://www.xiaohongshu.com/ 并登录，然后执行 `xhs login`
 - `NeedVerifyError` — 触发了验证码，请到浏览器中完成验证后重试
 - `IpBlockedError` — IP 被限制，尝试切换网络（手机热点或 VPN）
 - `SessionExpiredError` — Cookie 过期，执行 `xhs login` 刷新

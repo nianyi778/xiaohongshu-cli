@@ -28,14 +28,21 @@ def _xhs_user_payload(info: dict) -> dict[str, object]:
 
 
 @click.command()
+@click.option(
+    "--cookie-source",
+    type=str,
+    default=None,
+    help="Browser to read cookies from (default: auto-detect all installed browsers)",
+)
 @structured_output_options
 @click.pass_context
-def login(ctx, as_json: bool, as_yaml: bool):
+def login(ctx, cookie_source: str | None, as_json: bool, as_yaml: bool):
     """Log in by extracting cookies from browser."""
-    cookie_source = ctx.obj.get("cookie_source", "chrome") if ctx.obj else "chrome"
+    if cookie_source is None:
+        cookie_source = ctx.obj.get("cookie_source", "auto") if ctx.obj else "auto"
     try:
-        cookies = get_cookies(cookie_source, force_refresh=True)
-        print_success(f"Cookies extracted from {cookie_source}")
+        browser, cookies = get_cookies(cookie_source, force_refresh=True)
+        print_success(f"Cookies extracted from {browser}")
 
         # Verify by fetching user info
         with XhsClient(cookies) as client:

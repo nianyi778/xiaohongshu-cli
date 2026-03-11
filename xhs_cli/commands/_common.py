@@ -31,12 +31,12 @@ def structured_output_options(command: Callable) -> Callable:
 
 
 def _cookie_source(ctx) -> str:
-    return ctx.obj.get("cookie_source", "chrome") if ctx.obj else "chrome"
+    return ctx.obj.get("cookie_source", "auto") if ctx.obj else "auto"
 
 
 def get_client(ctx, *, force_refresh: bool = False) -> XhsClient:
     """Get an XhsClient from the click context."""
-    cookies = get_cookies(_cookie_source(ctx), force_refresh=force_refresh)
+    _browser, cookies = get_cookies(_cookie_source(ctx), force_refresh=force_refresh)
     return XhsClient(cookies)
 
 

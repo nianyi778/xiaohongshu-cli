@@ -40,11 +40,11 @@ If `AUTH_NEEDED`, proceed to Step 1.
 
 ### Step 1: Guide user to authenticate
 
-Ensure user is logged into xiaohongshu.com in one of: Chrome, Edge, Firefox, Safari, Brave. Then:
+Ensure user is logged into xiaohongshu.com in any browser supported by [browser_cookie3](https://github.com/borisbabic/browser_cookie3). Supported browsers: Chrome, Arc, Edge, Firefox, Safari, Brave, Chromium, Opera, Opera GX, Vivaldi, LibreWolf, Lynx, w3m. Then:
 
 ```bash
-xhs login                              # auto-extract cookies
-xhs login --cookie-source firefox      # specify browser
+xhs login                              # auto-detect browser with valid cookies
+xhs login --cookie-source arc          # specify browser explicitly
 ```
 
 Verify with:
