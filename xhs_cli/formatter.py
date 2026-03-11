@@ -329,6 +329,10 @@ def render_comments(data: dict[str, Any]) -> None:
         content = comment.get("content", "")
         like_count = comment.get("like_count", "0")
         sub_comment_count = comment.get("sub_comment_count", 0)
+        try:
+            sub_comment_count = int(sub_comment_count)
+        except (ValueError, TypeError):
+            sub_comment_count = 0
 
         header = f"[bold]{nickname}[/bold]  [dim]❤️ {like_count}[/dim]"
         if sub_comment_count > 0:
