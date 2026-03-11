@@ -16,6 +16,7 @@ class _FakeQrClient:
         self.create_seen_web_session = None
         self.status_seen_web_session = None
         self.activate_seen_web_sessions = []
+        self.self_info_calls = 0
         type(self).instances.append(self)
 
     def __enter__(self):
@@ -27,9 +28,7 @@ class _FakeQrClient:
     def login_activate(self):
         self.activate_calls += 1
         self.activate_seen_web_sessions.append(self.cookies.get("web_session"))
-        if self.activate_calls == 1:
-            return {"session": "guest-session", "secure_session": "guest-sec", "user_id": "guest-user"}
-        return {"session": "real-session", "secure_session": "real-sec", "user_id": "real-user"}
+        return {"session": "guest-session", "secure_session": "guest-sec", "user_id": "guest-user"}
 
     def create_qr_login(self):
         self.create_seen_web_session = self.cookies.get("web_session")
@@ -40,12 +39,22 @@ class _FakeQrClient:
         self.status_seen_web_session = self.cookies.get("web_session")
         return {"codeStatus": 2, "userId": "real-user"}
 
+    def get_self_info(self):
+        self.self_info_calls += 1
+        return {
+            "user_id": "real-user",
+            "basic_info": {
+                "user_id": "real-user",
+                "nickname": "Alice",
+                "red_id": "alice001",
+            },
+        }
+
 
 class _MismatchQrClient(_FakeQrClient):
-    def check_qr_status(self, qr_id, code):
-        self.status_calls += 1
-        self.status_seen_web_session = self.cookies.get("web_session")
-        return {"codeStatus": 2, "userId": "another-user"}
+    def get_self_info(self):
+        self.self_info_calls += 1
+        return {"user_id": "guest-user", "guest": True}
 
 
 def test_qrcode_login_carries_guest_session_into_followup_requests(monkeypatch):
@@ -61,14 +70,15 @@ def test_qrcode_login_carries_guest_session_into_followup_requests(monkeypatch):
     cookies = qrcode_login(timeout_s=1)
     client = _FakeQrClient.instances[-1]
 
-    assert client.activate_seen_web_sessions == [None, "guest-session"]
+    assert client.activate_seen_web_sessions == [None]
     assert client.create_seen_web_session == "guest-session"
     assert client.status_seen_web_session == "guest-session"
+    assert client.self_info_calls == 1
     assert cookies == {
         "a1": "a1-fixed",
         "webId": "webid-fixed",
-        "web_session": "real-session",
-        "web_session_sec": "real-sec",
+        "web_session": "guest-session",
+        "web_session_sec": "guest-sec",
     }
     assert saved == [cookies]
 
@@ -81,5 +91,5 @@ def test_qrcode_login_rejects_mismatched_confirmed_user(monkeypatch):
     monkeypatch.setattr("xhs_cli.qr_login.time.sleep", lambda seconds: None)
     monkeypatch.setattr("xhs_cli.qr_login.save_cookies", lambda cookies: None)
 
-    with pytest.raises(XhsApiError, match="different user"):
+    with pytest.raises(XhsApiError, match="never switched"):
         qrcode_login(timeout_s=1)

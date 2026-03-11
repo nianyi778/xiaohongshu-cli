@@ -9,8 +9,9 @@ Flow discovered through reverse engineering:
 3. Call ``/api/sns/web/v1/login/qrcode/create`` to create a QR code.
 4. Render the QR URL in the terminal.
 5. Poll ``/api/qrcode/userinfo`` until ``codeStatus == 2``.
-6. After confirmation, call ``activate`` **again** to get the real session.
-7. Save the final ``web_session`` cookie.
+6. After confirmation, verify that the current session has switched to the
+   confirmed user.
+7. Save the upgraded session cookies.
 """
 
 from __future__ import annotations
@@ -49,15 +50,65 @@ def _apply_session_cookies(client: XhsClient, payload: dict[str, str]) -> None:
 
 def _build_saved_cookies(a1: str, webid: str, payload: dict[str, str]) -> dict[str, str]:
     """Build the cookie payload persisted after QR login succeeds."""
+    session = payload.get("session") or payload.get("web_session", "")
+    secure_session = payload.get("secure_session") or payload.get("web_session_sec", "")
     cookies = {
         "a1": a1,
         "webId": webid,
     }
-    if payload.get("session"):
-        cookies["web_session"] = payload["session"]
-    if payload.get("secure_session"):
-        cookies["web_session_sec"] = payload["secure_session"]
+    if session:
+        cookies["web_session"] = session
+    if secure_session:
+        cookies["web_session_sec"] = secure_session
     return cookies
+
+
+def _resolved_user_id(info: dict[str, object]) -> str:
+    """Extract the current user ID from either flat or nested profile payloads."""
+    if not isinstance(info, dict):
+        return ""
+    basic = info.get("basic_info", info)
+    if isinstance(basic, dict) and basic.get("user_id"):
+        return str(basic["user_id"])
+    if info.get("user_id"):
+        return str(info["user_id"])
+    if info.get("userid"):
+        return str(info["userid"])
+    return ""
+
+
+def _wait_for_confirmed_session(
+    client: XhsClient,
+    confirmed_user_id: str,
+    *,
+    retries: int = 5,
+    wait_s: float = 1.0,
+) -> dict[str, object]:
+    """Wait for the current session to resolve to the QR-confirmed user."""
+    from .exceptions import XhsApiError
+
+    last_info: dict[str, object] = {}
+    for attempt in range(retries):
+        info = client.get_self_info()
+        if isinstance(info, dict):
+            last_info = info
+        current_user_id = _resolved_user_id(info)
+        logger.debug(
+            "QR verify self info attempt=%d confirmed_user_id=%s current_user_id=%s info=%s",
+            attempt + 1,
+            confirmed_user_id,
+            current_user_id,
+            info,
+        )
+        if current_user_id and current_user_id == confirmed_user_id:
+            return info
+        if attempt + 1 < retries:
+            time.sleep(wait_s)
+
+    raise XhsApiError(
+        "QR login confirmed, but the current session never switched to the confirmed user. "
+        f"expected={confirmed_user_id} got={_resolved_user_id(last_info) or 'unknown'}"
+    )
 
 
 def _generate_a1() -> str:
@@ -206,35 +257,15 @@ def qrcode_login(
                     _print("✅ Login confirmed!")
 
             if code_status == QR_CONFIRMED:
-                # 6. Activate again — now we get the REAL session
-                try:
-                    activate_data = client.login_activate()
-                    _apply_session_cookies(client, activate_data)
-                    session = activate_data.get("session", "")
-                    user_id = activate_data.get("user_id", "")
-                    logger.debug(
-                        "Post-confirm activate: session=%s user_id=%s",
-                        session, user_id,
-                    )
-                except Exception as exc:
-                    logger.debug("Post-confirm activate failed: %s", exc)
-                    session = ""
-
-                if not session:
-                    raise XhsApiError(
-                        "QR login confirmed but activate returned no session. "
-                        "Please try: xhs login (browser cookie extraction)"
-                    )
-
                 confirmed_user_id = status_data.get("userId", "")
-                if confirmed_user_id and user_id and confirmed_user_id != user_id:
-                    raise XhsApiError(
-                        "QR login confirmed for a different user than the saved session. "
-                        "Please retry the QR login flow."
-                    )
+                if not confirmed_user_id:
+                    raise XhsApiError("QR login confirmed but no confirmed userId was returned.")
+
+                info = _wait_for_confirmed_session(client, confirmed_user_id)
+                user_id = _resolved_user_id(info)
 
                 # 7. Save cookies
-                cookies = _build_saved_cookies(a1, webid, activate_data)
+                cookies = _build_saved_cookies(a1, webid, client.cookies)
                 save_cookies(cookies)
                 _print(f"👤 User ID: {user_id}")
 
