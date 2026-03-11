@@ -1,16 +1,21 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      contents: read     # Required to checkout private repo
-      id-token: write    # Required for Trusted Publishing (OIDC)
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -19,10 +24,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build
-        run: |
-          pip install build
-          python -m build
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build package
+        run: uv build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

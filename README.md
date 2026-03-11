@@ -1,6 +1,7 @@
 # xiaohongshu-cli
 
 [![CI](https://github.com/jackwener/xiaohongshu-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/jackwener/xiaohongshu-cli/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/xiaohongshu-cli.svg)](https://pypi.org/project/xiaohongshu-cli/)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue.svg)](https://pypi.org/project/xiaohongshu-cli/)
 
 A CLI for Xiaohongshu (小红书) — search, read, interact, and post via reverse-engineered API 📕
