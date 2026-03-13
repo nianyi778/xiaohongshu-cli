@@ -38,22 +38,28 @@ from .formatter_utils import (  # noqa: F401
 # ─── URL parsing ────────────────────────────────────────────────────────────
 
 
+def parse_note_reference(id_or_url: str) -> tuple[str, str, str]:
+    """Extract note ID, xsec_token, and xsec_source from a URL or plain ID."""
+    if "xiaohongshu.com" in id_or_url:
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(id_or_url)
+        parts = parsed.path.rstrip("/").split("/")
+        note_id = parts[-1]
+        qs = parse_qs(parsed.query)
+        xsec_token = qs.get("xsec_token", [""])[0]
+        xsec_source = qs.get("xsec_source", [""])[0]
+        return note_id, xsec_token, xsec_source
+    return id_or_url, "", ""
+
+
 def parse_note_url(id_or_url: str) -> tuple[str, str]:
     """Extract note ID and xsec_token from URL or plain ID.
 
     Returns (note_id, xsec_token). xsec_token may be empty if not in URL.
     """
-    if "xiaohongshu.com" in id_or_url:
-        from urllib.parse import parse_qs, urlparse
-        parsed = urlparse(id_or_url)
-        # Extract note ID from path
-        parts = parsed.path.rstrip("/").split("/")
-        note_id = parts[-1]
-        # Extract xsec_token from query params
-        qs = parse_qs(parsed.query)
-        xsec_token = qs.get("xsec_token", [""])[0]
-        return note_id, xsec_token
-    return id_or_url, ""
+    note_id, xsec_token, _xsec_source = parse_note_reference(id_or_url)
+    return note_id, xsec_token
 
 
 def extract_note_id(id_or_url: str) -> str:

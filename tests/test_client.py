@@ -1,9 +1,12 @@
 """Unit tests for XHS client request payloads, cookies, and endpoint selection."""
 
+from collections import OrderedDict
+
 import httpx
 import pytest
 
 from xhs_cli.client import XhsClient
+from xhs_cli.cookies import cache_note_context, get_cached_note_context
 from xhs_cli.exceptions import UnsupportedOperationError, XhsApiError
 
 
@@ -96,3 +99,180 @@ class TestTransportCookies:
         assert resp is response
         assert client.cookies["web_session"] == "real-session"
         assert client.cookies["web_session_sec"] == "real-sec"
+
+
+class TestReadingEndpointBehavior:
+    def test_get_note_detail_prefers_cached_xsec_source(self, monkeypatch):
+        captured = {}
+
+        def fake_get_note_by_id(self, note_id, xsec_token="", xsec_source="pc_feed"):
+            captured["note_id"] = note_id
+            captured["token"] = xsec_token
+            captured["source"] = xsec_source
+            return {"items": [{"note_card": {"title": "ok"}}]}
+
+        monkeypatch.setattr(XhsClient, "get_note_by_id", fake_get_note_by_id)
+        cache_note_context("note-123", "token-xyz", "pc_search")
+
+        client = XhsClient({"a1": "cookie"})
+        try:
+            client.get_note_detail("note-123")
+        finally:
+            client.close()
+
+        assert captured == {
+            "note_id": "note-123",
+            "token": "token-xyz",
+            "source": "pc_search",
+        }
+
+    def test_search_notes_uses_browser_like_prewarm_sequence(self, monkeypatch):
+        calls = []
+
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", True)
+
+        def fake_get(self, uri, params=None):
+            calls.append(("GET", uri, params))
+            return {"ok": True}
+
+        def fake_post(self, uri, data, header_overrides=None):
+            calls.append(("POST", uri, data))
+            if uri == "/api/sns/web/v1/search/notes":
+                return {"items": [], "has_more": False}
+            return {"ok": True}
+
+        monkeypatch.setattr(XhsClient, "_main_api_get", fake_get)
+        monkeypatch.setattr(XhsClient, "_main_api_post", fake_post)
+
+        client = XhsClient({"a1": "cookie"})
+        try:
+            client.search_notes("openclaw prompt", page=2)
+        finally:
+            client.close()
+
+        assert [call[1] for call in calls] == [
+            "/api/sns/web/v1/search/onebox",
+            "/api/sns/web/v1/search/filter",
+            "/api/sns/web/v1/search/notes",
+            "/api/sns/web/v1/search/recommend",
+        ]
+
+        notes_payload = calls[2][2]
+        assert notes_payload["page"] == 2
+        assert notes_payload["filters"][0]["type"] == "sort_type"
+        assert notes_payload["filters"][1]["type"] == "filter_note_type"
+
+    def test_search_notes_reuses_search_id_across_pages(self, monkeypatch):
+        calls = []
+
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", True)
+
+        def fake_get(self, uri, params=None):
+            calls.append(("GET", uri, params))
+            return {"ok": True}
+
+        def fake_post(self, uri, data, header_overrides=None):
+            calls.append(("POST", uri, data))
+            if uri == "/api/sns/web/v1/search/notes":
+                return {"items": [], "has_more": False}
+            return {"ok": True}
+
+        monkeypatch.setattr(XhsClient, "_main_api_get", fake_get)
+        monkeypatch.setattr(XhsClient, "_main_api_post", fake_post)
+
+        client = XhsClient({"a1": "cookie"})
+        try:
+            client.search_notes("openclaw", page=1)
+            client.search_notes("openclaw", page=2)
+        finally:
+            client.close()
+
+        notes_calls = [call for call in calls if call[1] == "/api/sns/web/v1/search/notes"]
+        assert len(notes_calls) == 2
+        assert notes_calls[0][2]["search_id"] == notes_calls[1][2]["search_id"]
+
+        onebox_calls = [call for call in calls if call[1] == "/api/sns/web/v1/search/onebox"]
+        filter_calls = [call for call in calls if call[1] == "/api/sns/web/v1/search/filter"]
+        recommend_calls = [call for call in calls if call[1] == "/api/sns/web/v1/search/recommend"]
+        assert len(onebox_calls) == 1
+        assert len(filter_calls) == 1
+        assert len(recommend_calls) == 1
+
+    def test_search_notes_reuses_search_id_after_cache_reload(self, monkeypatch, tmp_path):
+        first_calls = []
+        second_calls = []
+
+        monkeypatch.setattr("xhs_cli.client_mixins.get_config_dir", lambda: tmp_path)
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", False)
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_PATH", None)
+
+        def fake_get_first(self, uri, params=None):
+            first_calls.append(("GET", uri, params))
+            return {"ok": True}
+
+        def fake_post_first(self, uri, data, header_overrides=None):
+            first_calls.append(("POST", uri, data))
+            if uri == "/api/sns/web/v1/search/notes":
+                return {"items": [], "has_more": False}
+            return {"ok": True}
+
+        monkeypatch.setattr(XhsClient, "_main_api_get", fake_get_first)
+        monkeypatch.setattr(XhsClient, "_main_api_post", fake_post_first)
+
+        client = XhsClient({"a1": "cookie"})
+        try:
+            client.search_notes("openclaw", page=1)
+        finally:
+            client.close()
+
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", False)
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_PATH", None)
+
+        def fake_get_second(self, uri, params=None):
+            second_calls.append(("GET", uri, params))
+            return {"ok": True}
+
+        def fake_post_second(self, uri, data, header_overrides=None):
+            second_calls.append(("POST", uri, data))
+            if uri == "/api/sns/web/v1/search/notes":
+                return {"items": [], "has_more": False}
+            return {"ok": True}
+
+        monkeypatch.setattr(XhsClient, "_main_api_get", fake_get_second)
+        monkeypatch.setattr(XhsClient, "_main_api_post", fake_post_second)
+
+        client = XhsClient({"a1": "cookie"})
+        try:
+            client.search_notes("openclaw", page=2)
+        finally:
+            client.close()
+
+        first_notes_call = next(call for call in first_calls if call[1] == "/api/sns/web/v1/search/notes")
+        second_notes_call = next(call for call in second_calls if call[1] == "/api/sns/web/v1/search/notes")
+        assert first_notes_call[2]["search_id"] == second_notes_call[2]["search_id"]
+        assert [call[1] for call in second_calls] == ["/api/sns/web/v1/search/notes"]
+
+    def test_get_note_detail_invalidates_cached_context_after_feed_failure(self, monkeypatch):
+        cache_note_context("note-123", "stale-token", "pc_search")
+
+        def fake_get_note_by_id(self, note_id, xsec_token="", xsec_source="pc_feed"):
+            raise XhsApiError("stale token")
+
+        def fake_get_note_from_html(self, note_id, xsec_token="", xsec_source="pc_feed"):
+            return {"items": [{"note_card": {"title": "html-ok"}}]}
+
+        monkeypatch.setattr(XhsClient, "get_note_by_id", fake_get_note_by_id)
+        monkeypatch.setattr(XhsClient, "get_note_from_html", fake_get_note_from_html)
+
+        client = XhsClient({"a1": "cookie"})
+        try:
+            result = client.get_note_detail("note-123")
+        finally:
+            client.close()
+
+        assert result["items"][0]["note_card"]["title"] == "html-ok"
+        assert get_cached_note_context("note-123") == {}

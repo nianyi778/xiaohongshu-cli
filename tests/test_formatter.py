@@ -1,6 +1,6 @@
 """Unit tests for formatter (no network required)."""
 
-from xhs_cli.formatter import coerce_int, extract_note_id, format_count
+from xhs_cli.formatter import coerce_int, extract_note_id, format_count, parse_note_reference
 
 
 class TestFormatCount:
@@ -50,3 +50,13 @@ class TestExtractNoteId:
     def test_trailing_slash(self):
         result = extract_note_id("https://www.xiaohongshu.com/explore/abc123/")
         assert result == "abc123"
+
+
+class TestParseNoteReference:
+    def test_extracts_token_and_source(self):
+        note_id, token, source = parse_note_reference(
+            "https://www.xiaohongshu.com/explore/abc123?xsec_token=token-1&xsec_source=pc_search"
+        )
+        assert note_id == "abc123"
+        assert token == "token-1"
+        assert source == "pc_search"

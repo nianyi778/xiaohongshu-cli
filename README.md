@@ -124,6 +124,7 @@ xhs unread                             # Unread counts (likes, mentions, follows
 xhs notifications                      # 评论和@ notifications
 xhs notifications --type likes        # 赞和收藏 notifications
 xhs notifications --type connections   # 新增关注 notifications
+
 ```
 
 ## Authentication
@@ -147,7 +148,6 @@ Saved cookies are valid for **7 days** by default. After that, the client automa
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OUTPUT` | `auto` | Output format: `json`, `yaml`, `rich`, or `auto` (→ YAML when non-TTY) |
-
 ## Rate Limiting & Anti-Detection
 
 xiaohongshu-cli includes comprehensive anti-risk-control measures designed to minimize detection:

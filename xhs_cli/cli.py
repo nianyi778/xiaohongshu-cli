@@ -101,6 +101,5 @@ cli.add_command(creator.delete)
 cli.add_command(notifications.notifications)
 cli.add_command(notifications.unread)
 
-
 if __name__ == "__main__":
     cli()

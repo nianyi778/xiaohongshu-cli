@@ -147,7 +147,8 @@ def status(ctx, as_json: bool, as_yaml: bool):
 
 @click.command()
 @structured_output_options
-def logout(as_json: bool, as_yaml: bool):
+@click.pass_context
+def logout(ctx, as_json: bool, as_yaml: bool):
     """Clear saved cookies and log out."""
     clear_cookies()
     if not _emit_payload({"logged_out": True}, as_json=as_json, as_yaml=as_yaml):

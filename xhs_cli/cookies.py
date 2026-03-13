@@ -7,8 +7,11 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
+from typing import Any
 
 from .constants import CONFIG_DIR_NAME, COOKIE_FILE, TOKEN_CACHE_FILE
 
@@ -17,6 +20,10 @@ logger = logging.getLogger(__name__)
 # Cookie TTL: warn and attempt browser refresh after 7 days
 COOKIE_TTL_DAYS = 7
 _COOKIE_TTL_SECONDS = COOKIE_TTL_DAYS * 86400
+_TOKEN_CACHE_LOCK = threading.RLock()
+_TOKEN_CACHE_MEMORY: OrderedDict[str, dict[str, Any]] | None = None
+_TOKEN_CACHE_PATH: Path | None = None
+NOTE_CONTEXT_TTL_SECONDS = 86400
 
 
 
@@ -69,48 +76,141 @@ def clear_cookies() -> None:
         logger.debug("Cleared cookies from %s", cookie_path)
 
 
-def load_token_cache() -> dict[str, str]:
-    """Load cached note_id -> xsec_token mappings."""
-    cache_path = get_token_cache_path()
+def _normalize_token_entry(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, str):
+        return {"token": value, "source": "", "ts": time.time()}
+    if not isinstance(value, dict):
+        return None
+
+    token = str(value.get("token", "")).strip()
+    if not token:
+        return None
+
+    source = str(value.get("source", "")).strip()
+    context = str(value.get("context", "")).strip()
+    ts = value.get("ts", 0)
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError):
+        ts = 0.0
+
+    entry = {"token": token, "source": source, "ts": ts}
+    if context:
+        entry["context"] = context
+    return entry
+
+
+def _load_token_cache_from_disk(cache_path: Path) -> OrderedDict[str, dict[str, Any]]:
     if not cache_path.exists():
-        return {}
+        return OrderedDict()
     try:
         data = json.loads(cache_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         logger.debug("Failed to load token cache: %s", exc)
-        return {}
+        return OrderedDict()
     if not isinstance(data, dict):
-        return {}
-    return {str(k): str(v) for k, v in data.items() if k and v}
+        return OrderedDict()
+
+    normalized: list[tuple[str, dict[str, Any]]] = []
+    for key, value in data.items():
+        if not key:
+            continue
+        entry = _normalize_token_entry(value)
+        if entry:
+            normalized.append((str(key), entry))
+    normalized.sort(key=lambda item: float(item[1].get("ts", 0)))
+    return OrderedDict(normalized)
 
 
-def save_token_cache(cache: dict[str, str]) -> None:
+def _prune_token_cache(cache: OrderedDict[str, dict[str, Any]], now: float | None = None) -> OrderedDict[str, dict[str, Any]]:
+    now = now or time.time()
+    pruned = OrderedDict(
+        (key, value)
+        for key, value in cache.items()
+        if now - float(value.get("ts", 0)) <= NOTE_CONTEXT_TTL_SECONDS
+    )
+    while len(pruned) > TOKEN_CACHE_MAX_SIZE:
+        pruned.popitem(last=False)
+    return pruned
+
+
+def load_token_cache() -> dict[str, dict[str, Any]]:
+    """Load cached note_id -> token context mappings."""
+    cache_path = get_token_cache_path()
+    global _TOKEN_CACHE_MEMORY, _TOKEN_CACHE_PATH
+
+    with _TOKEN_CACHE_LOCK:
+        if _TOKEN_CACHE_MEMORY is None or _TOKEN_CACHE_PATH != cache_path:
+            _TOKEN_CACHE_MEMORY = _prune_token_cache(_load_token_cache_from_disk(cache_path))
+            _TOKEN_CACHE_PATH = cache_path
+        return {
+            key: dict(value)
+            for key, value in _TOKEN_CACHE_MEMORY.items()
+        }
+
+
+def save_token_cache(cache: dict[str, dict[str, Any]]) -> None:
     """Persist xsec token cache with restricted permissions."""
     cache_path = get_token_cache_path()
-    cache_path.write_text(json.dumps(cache, indent=2))
-    cache_path.chmod(0o600)
+    global _TOKEN_CACHE_MEMORY, _TOKEN_CACHE_PATH
+
+    normalized = _prune_token_cache(OrderedDict(
+        sorted(
+            (
+                (str(key), dict(value))
+                for key, value in cache.items()
+                if key and isinstance(value, dict)
+            ),
+            key=lambda item: float(item[1].get("ts", 0)),
+        )
+    ))
+
+    with _TOKEN_CACHE_LOCK:
+        cache_path.write_text(json.dumps(normalized, indent=2))
+        cache_path.chmod(0o600)
+        _TOKEN_CACHE_MEMORY = normalized
+        _TOKEN_CACHE_PATH = cache_path
 
 
 TOKEN_CACHE_MAX_SIZE = 500
 
 
-def cache_xsec_token(note_id: str, xsec_token: str) -> None:
-    """Store a resolved xsec token for later comment/detail access.
+def cache_note_context(
+    note_id: str,
+    xsec_token: str,
+    xsec_source: str = "",
+    *,
+    context: str = "",
+) -> None:
+    """Store a resolved note token and source for later access.
 
     Maintains an LRU-style cache capped at TOKEN_CACHE_MAX_SIZE entries.
-    Each entry stores (token, timestamp); overflow evicts the oldest entries.
+    Each entry stores token/source/timestamp metadata; overflow evicts the
+    oldest entries.
     """
     if not note_id or not xsec_token:
         return
     cache = load_token_cache()
 
     existing = cache.get(note_id)
-    if isinstance(existing, dict) and existing.get("token") == xsec_token:
+    if (
+        isinstance(existing, dict)
+        and existing.get("token") == xsec_token
+        and existing.get("source", "") == xsec_source
+        and existing.get("context", "") == context
+    ):
         existing["ts"] = time.time()
         save_token_cache(cache)
         return
 
-    cache[note_id] = {"token": xsec_token, "ts": time.time()}
+    entry = {
+        "token": xsec_token,
+        "source": xsec_source,
+        "ts": time.time(),
+    }
+    if context:
+        entry["context"] = context
+    cache[note_id] = entry
 
     # Evict oldest entries if over limit
     if len(cache) > TOKEN_CACHE_MAX_SIZE:
@@ -125,12 +225,39 @@ def cache_xsec_token(note_id: str, xsec_token: str) -> None:
     logger.debug("Cached xsec_token for note %s", note_id)
 
 
+def invalidate_note_context(note_id: str) -> None:
+    """Remove cached token/source metadata for a note ID."""
+    if not note_id:
+        return
+    cache = load_token_cache()
+    if note_id not in cache:
+        return
+    del cache[note_id]
+    save_token_cache(cache)
+    logger.debug("Invalidated cached note context for %s", note_id)
+
+
+def cache_xsec_token(note_id: str, xsec_token: str) -> None:
+    """Backwards-compatible wrapper for token-only caching."""
+    cache_note_context(note_id, xsec_token)
+
+
+def get_cached_note_context(note_id: str) -> dict[str, Any]:
+    """Get cached token/source metadata for a note ID."""
+    entry = load_token_cache().get(note_id)
+    if not isinstance(entry, dict):
+        return {}
+    return {
+        "token": str(entry.get("token", "")),
+        "source": str(entry.get("source", "")),
+        "context": str(entry.get("context", "")),
+        "ts": entry.get("ts", 0.0),
+    }
+
+
 def get_cached_xsec_token(note_id: str) -> str:
     """Get a cached xsec token for a note ID."""
-    entry = load_token_cache().get(note_id, "")
-    if isinstance(entry, dict):
-        return entry.get("token", "")
-    return str(entry) if entry else ""
+    return get_cached_note_context(note_id).get("token", "")
 
 
 @functools.lru_cache(maxsize=1)

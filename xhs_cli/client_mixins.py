@@ -7,15 +7,38 @@ import logging
 import mimetypes
 import random
 import re
+import threading
 import time
+from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from .constants import CREATOR_HOST, HOME_URL, UPLOAD_HOST, USER_AGENT
-from .cookies import cache_xsec_token, cookies_to_string, get_cached_xsec_token
+from .cookies import (
+    cache_note_context,
+    cookies_to_string,
+    get_config_dir,
+    get_cached_note_context,
+    invalidate_note_context,
+)
 from .exceptions import NeedVerifyError, UnsupportedOperationError, XhsApiError
 from .html_parser import extract_note_from_html
 
 logger = logging.getLogger(__name__)
+
+_SEARCH_DEFAULT_FILTERS = [
+    {"tags": ["general"], "type": "sort_type"},
+    {"tags": ["不限"], "type": "filter_note_type"},
+    {"tags": ["不限"], "type": "filter_note_time"},
+    {"tags": ["不限"], "type": "filter_note_range"},
+    {"tags": ["不限"], "type": "filter_pos_distance"},
+]
+_SEARCH_SESSION_TTL_SECONDS = 600
+_SEARCH_SESSION_MAX_SIZE = 128
+_SEARCH_SESSION_LOCK = threading.RLock()
+_SEARCH_SESSION_CACHE: OrderedDict[tuple[str, str, int], dict[str, Any]] = OrderedDict()
+_SEARCH_SESSION_CACHE_PATH: Path | None = None
+_SEARCH_SESSION_CACHE_LOADED = False
 
 
 def _generate_search_id() -> str:
@@ -34,12 +57,154 @@ def _generate_search_id() -> str:
     return result
 
 
+def _search_session_key(keyword: str, sort: str, note_type: int) -> tuple[str, str, int]:
+    return (keyword.strip(), sort, note_type)
+
+
+def _search_session_path() -> Path:
+    return get_config_dir() / "search_sessions.json"
+
+
+def _serialize_search_session_key(key: tuple[str, str, int]) -> str:
+    return json.dumps([key[0], key[1], key[2]], ensure_ascii=False)
+
+
+def _deserialize_search_session_key(value: str) -> tuple[str, str, int] | None:
+    try:
+        keyword, sort, note_type = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(keyword, str) or not isinstance(sort, str):
+        return None
+    try:
+        normalized_note_type = int(note_type)
+    except (TypeError, ValueError):
+        return None
+    return (keyword, sort, normalized_note_type)
+
+
+def _load_search_session_cache_from_disk(path: Path) -> OrderedDict[tuple[str, str, int], dict[str, Any]]:
+    if not path.exists():
+        return OrderedDict()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return OrderedDict()
+    if not isinstance(data, dict):
+        return OrderedDict()
+
+    normalized: list[tuple[tuple[str, str, int], dict[str, Any]]] = []
+    for raw_key, value in data.items():
+        key = _deserialize_search_session_key(raw_key)
+        if not key or not isinstance(value, dict):
+            continue
+        if not value.get("search_id"):
+            continue
+        normalized.append((key, {
+            "search_id": str(value["search_id"]),
+            "created_at": float(value.get("created_at", 0) or 0),
+            "last_used_at": float(value.get("last_used_at", 0) or 0),
+        }))
+    normalized.sort(key=lambda item: float(item[1].get("last_used_at", 0)))
+    return OrderedDict(normalized)
+
+
+def _save_search_session_cache(path: Path) -> None:
+    payload = OrderedDict(
+        (
+            _serialize_search_session_key(key),
+            dict(value),
+        )
+        for key, value in _SEARCH_SESSION_CACHE.items()
+    )
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    path.chmod(0o600)
+
+
+def _ensure_search_session_cache_loaded() -> None:
+    global _SEARCH_SESSION_CACHE_LOADED, _SEARCH_SESSION_CACHE_PATH, _SEARCH_SESSION_CACHE
+    path = _search_session_path()
+    if _SEARCH_SESSION_CACHE_LOADED and _SEARCH_SESSION_CACHE_PATH == path:
+        return
+    _SEARCH_SESSION_CACHE = _load_search_session_cache_from_disk(path)
+    _SEARCH_SESSION_CACHE_PATH = path
+    _SEARCH_SESSION_CACHE_LOADED = True
+
+
+def _prune_search_sessions(now: float) -> None:
+    expired_keys = [
+        key
+        for key, value in _SEARCH_SESSION_CACHE.items()
+        if now - float(value.get("last_used_at", 0)) > _SEARCH_SESSION_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        _SEARCH_SESSION_CACHE.pop(key, None)
+
+    while len(_SEARCH_SESSION_CACHE) > _SEARCH_SESSION_MAX_SIZE:
+        _SEARCH_SESSION_CACHE.popitem(last=False)
+
+
+def _acquire_search_session(keyword: str, sort: str, note_type: int) -> tuple[str, bool]:
+    now = time.time()
+    key = _search_session_key(keyword, sort, note_type)
+
+    with _SEARCH_SESSION_LOCK:
+        _ensure_search_session_cache_loaded()
+        _prune_search_sessions(now)
+        existing = _SEARCH_SESSION_CACHE.get(key)
+        if existing:
+            existing["last_used_at"] = now
+            _SEARCH_SESSION_CACHE.move_to_end(key)
+            _save_search_session_cache(_SEARCH_SESSION_CACHE_PATH or _search_session_path())
+            return str(existing["search_id"]), False
+
+        search_id = _generate_search_id()
+        _SEARCH_SESSION_CACHE[key] = {
+            "search_id": search_id,
+            "created_at": now,
+            "last_used_at": now,
+        }
+        _save_search_session_cache(_SEARCH_SESSION_CACHE_PATH or _search_session_path())
+        return search_id, True
+
+
+def get_search_session_stats() -> dict[str, Any]:
+    """Return lightweight debug stats for the in-memory search session cache."""
+    now = time.time()
+    with _SEARCH_SESSION_LOCK:
+        _ensure_search_session_cache_loaded()
+        _prune_search_sessions(now)
+        if not _SEARCH_SESSION_CACHE:
+            return {
+                "active_count": 0,
+                "last_keyword": "",
+                "last_sort": "",
+                "last_note_type": None,
+            }
+
+        last_key = next(reversed(_SEARCH_SESSION_CACHE))
+        return {
+            "active_count": len(_SEARCH_SESSION_CACHE),
+            "last_keyword": last_key[0],
+            "last_sort": last_key[1],
+            "last_note_type": last_key[2],
+        }
+
+
 class ReadingEndpointsMixin:
     """Read-only note, profile, and discovery endpoints."""
 
-    def _fetch_note_html(self, note_id: str, xsec_token: str = "") -> str:
+    def _search_request_id(self) -> str:
+        return f"{random.randint(1_000_000_000, 2_147_483_647)}-{int(time.time() * 1000)}"
+
+    def _fetch_note_html(
+        self,
+        note_id: str,
+        xsec_token: str = "",
+        xsec_source: str = "pc_feed",
+    ) -> str:
         if xsec_token:
-            url = f"{HOME_URL}/explore/{note_id}?xsec_token={xsec_token}&xsec_source=pc_feed"
+            url = f"{HOME_URL}/explore/{note_id}?xsec_token={xsec_token}&xsec_source={xsec_source}"
         else:
             url = f"{HOME_URL}/explore/{note_id}"
 
@@ -54,15 +219,20 @@ class ReadingEndpointsMixin:
         )
         return resp.text
 
-    def resolve_xsec_token(self, note_id: str, preferred_token: str = "") -> str:
-        """Resolve xsec_token from explicit input, cache, or note page metadata."""
+    def resolve_xsec_context(
+        self,
+        note_id: str,
+        preferred_token: str = "",
+        preferred_source: str = "",
+    ) -> tuple[str, str]:
+        """Resolve xsec_token/xsec_source from input, cache, or note page metadata."""
         if preferred_token:
-            cache_xsec_token(note_id, preferred_token)
-            return preferred_token
+            cache_note_context(note_id, preferred_token, preferred_source)
+            return preferred_token, preferred_source
 
-        cached = get_cached_xsec_token(note_id)
-        if cached:
-            return cached
+        cached = get_cached_note_context(note_id)
+        if cached.get("token"):
+            return cached["token"], cached.get("source", "")
 
         html = self._fetch_note_html(note_id)
         patterns = [
@@ -74,9 +244,16 @@ class ReadingEndpointsMixin:
             match = re.search(pattern, html)
             if match:
                 token = match.group(1)
-                cache_xsec_token(note_id, token)
-                return token
-        return ""
+                source_match = re.search(r"xsec_source=([^&\"']+)", html)
+                source = source_match.group(1) if source_match else preferred_source
+                cache_note_context(note_id, token, source)
+                return token, source
+        return "", preferred_source
+
+    def resolve_xsec_token(self, note_id: str, preferred_token: str = "") -> str:
+        """Resolve xsec_token from explicit input, cache, or note page metadata."""
+        token, _source = self.resolve_xsec_context(note_id, preferred_token)
+        return token
 
     def get_self_info(self) -> dict[str, Any]:
         return self._main_api_get("/api/sns/web/v2/user/me")
@@ -102,8 +279,24 @@ class ReadingEndpointsMixin:
         sort: str = "general",
         note_type: int = 0,
     ) -> Any:
-        search_id = _generate_search_id()
-        return self._main_api_post("/api/sns/web/v1/search/notes", {
+        search_id, is_new_session = _acquire_search_session(keyword, sort, note_type)
+        if is_new_session:
+            request_id = self._search_request_id()
+            try:
+                self._main_api_post("/api/sns/web/v1/search/onebox", {
+                    "keyword": keyword,
+                    "search_id": search_id,
+                    "biz_type": "web_search_user",
+                    "request_id": request_id,
+                })
+                self._main_api_get("/api/sns/web/v1/search/filter", {
+                    "keyword": keyword,
+                    "search_id": search_id,
+                })
+            except XhsApiError as exc:
+                logger.debug("Search prewarm failed, continuing with search/notes: %s", exc)
+
+        result = self._main_api_post("/api/sns/web/v1/search/notes", {
             "keyword": keyword,
             "page": page,
             "page_size": page_size,
@@ -111,9 +304,16 @@ class ReadingEndpointsMixin:
             "sort": sort,
             "note_type": note_type,
             "ext_flags": [],
+            "filters": _SEARCH_DEFAULT_FILTERS,
             "geo": "",
             "image_formats": ["jpg", "webp", "avif"],
         })
+        if is_new_session:
+            try:
+                self._main_api_get("/api/sns/web/v1/search/recommend", {"keyword": keyword})
+            except XhsApiError as exc:
+                logger.debug("Search recommend prefetch failed: %s", exc)
+        return result
 
     def get_note_by_id(
         self,
@@ -122,7 +322,7 @@ class ReadingEndpointsMixin:
         xsec_source: str = "pc_feed",
     ) -> Any:
         if xsec_token:
-            cache_xsec_token(note_id, xsec_token)
+            cache_note_context(note_id, xsec_token, xsec_source)
         return self._main_api_post("/api/sns/web/v1/feed", {
             "source_note_id": note_id,
             "image_formats": ["jpg", "webp", "avif"],
@@ -131,25 +331,41 @@ class ReadingEndpointsMixin:
             "xsec_token": xsec_token,
         })
 
-    def get_note_from_html(self, note_id: str, xsec_token: str = "") -> dict[str, Any]:
+    def get_note_from_html(
+        self,
+        note_id: str,
+        xsec_token: str = "",
+        xsec_source: str = "pc_feed",
+    ) -> dict[str, Any]:
         """Fetch note by parsing server-rendered HTML (no xsec_token required)."""
-        html = self._fetch_note_html(note_id, xsec_token=xsec_token)
+        html = self._fetch_note_html(note_id, xsec_token=xsec_token, xsec_source=xsec_source)
         return extract_note_from_html(html, note_id)
 
-    def get_note_detail(self, note_id: str, xsec_token: str = "") -> dict[str, Any]:
+    def get_note_detail(
+        self,
+        note_id: str,
+        xsec_token: str = "",
+        xsec_source: str = "",
+    ) -> dict[str, Any]:
         """Read a note via the best available channel.
 
         Strategy:
           - Has xsec_token → try feed API first, fall back to HTML on error
           - No xsec_token  → go straight to HTML (feed API would reject)
         """
-        token = xsec_token or get_cached_xsec_token(note_id)
+        cached = get_cached_note_context(note_id)
+        token = xsec_token or cached.get("token", "")
+        source = xsec_source or cached.get("source", "") or "pc_feed"
+        used_cached_context = not xsec_token and bool(cached.get("token"))
         if token:
             try:
-                return self.get_note_by_id(note_id, xsec_token=token)
+                return self.get_note_by_id(note_id, xsec_token=token, xsec_source=source)
             except (NeedVerifyError, XhsApiError) as exc:
                 logger.info("Feed API failed (%s), falling back to HTML", exc)
-        return self.get_note_from_html(note_id, xsec_token=token or "")
+                if used_cached_context:
+                    invalidate_note_context(note_id)
+                    token = ""
+        return self.get_note_from_html(note_id, xsec_token=token or "", xsec_source=source)
 
     def get_home_feed(self, category: str = "homefeed_recommend") -> dict[str, Any]:
         return self._main_api_post("/api/sns/web/v1/homefeed", {
@@ -175,24 +391,47 @@ class ReadingEndpointsMixin:
         cursor: str = "",
         xsec_token: str = "",
         top_comment_id: str = "",
+        xsec_source: str = "",
     ) -> Any:
-        token = self.resolve_xsec_token(note_id, xsec_token)
+        cached = get_cached_note_context(note_id)
+        used_cached_context = not xsec_token and bool(cached.get("token"))
+        token, source = self.resolve_xsec_context(note_id, xsec_token, xsec_source)
         if not token:
             raise XhsApiError(
                 "Could not resolve xsec_token for comments. Pass a full note URL or --xsec-token explicitly."
             )
-        return self._main_api_get("/api/sns/web/v2/comment/page", {
-            "note_id": note_id,
-            "cursor": cursor,
-            "top_comment_id": top_comment_id,
-            "image_formats": "jpg,webp,avif",
-            "xsec_token": token,
-        })
+        if source:
+            cache_note_context(note_id, token, source)
+        try:
+            return self._main_api_get("/api/sns/web/v2/comment/page", {
+                "note_id": note_id,
+                "cursor": cursor,
+                "top_comment_id": top_comment_id,
+                "image_formats": "jpg,webp,avif",
+                "xsec_token": token,
+            })
+        except (NeedVerifyError, XhsApiError):
+            if not used_cached_context:
+                raise
+            invalidate_note_context(note_id)
+            refreshed_token, refreshed_source = self.resolve_xsec_context(note_id, "", xsec_source)
+            if not refreshed_token:
+                raise
+            if refreshed_source:
+                cache_note_context(note_id, refreshed_token, refreshed_source)
+            return self._main_api_get("/api/sns/web/v2/comment/page", {
+                "note_id": note_id,
+                "cursor": cursor,
+                "top_comment_id": top_comment_id,
+                "image_formats": "jpg,webp,avif",
+                "xsec_token": refreshed_token,
+            })
 
     def get_all_comments(
         self,
         note_id: str,
         xsec_token: str = "",
+        xsec_source: str = "",
         max_pages: int = 20,
     ) -> dict[str, Any]:
         all_comments: list[dict[str, Any]] = []
@@ -200,7 +439,12 @@ class ReadingEndpointsMixin:
         pages = 0
 
         while pages < max_pages:
-            data = self.get_comments(note_id, cursor=cursor, xsec_token=xsec_token)
+            data = self.get_comments(
+                note_id,
+                cursor=cursor,
+                xsec_token=xsec_token,
+                xsec_source=xsec_source,
+            )
             if not isinstance(data, dict):
                 break
 

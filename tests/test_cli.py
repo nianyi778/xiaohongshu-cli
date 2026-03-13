@@ -187,3 +187,55 @@ class TestCliBasic:
         assert result.exit_code == 0
         assert "tester" in result.output
         assert "2 replies" in result.output
+
+    def test_search_rich_output_shortens_visible_links(self, monkeypatch):
+        monkeypatch.setenv("OUTPUT", "rich")
+        monkeypatch.setattr(
+            "xhs_cli.commands.reading.handle_command",
+            lambda ctx, action, render, as_json, as_yaml: render({
+                "items": [
+                    {
+                        "id": "69ad061d000000002603326d",
+                        "xsec_token": "very-long-token-value",
+                        "note_card": {
+                            "title": "测试标题",
+                            "user": {"nickname": "tester"},
+                            "interact_info": {"liked_count": "12"},
+                            "type": "normal",
+                        },
+                    }
+                ],
+                "has_more": False,
+            }),
+        )
+
+        result = runner.invoke(cli, ["search", "openclaw"])
+
+        assert result.exit_code == 0
+        assert "search_result/69ad061d" in result.output
+        assert "very-long-token-value" not in result.output
+
+    def test_feed_rich_output_shortens_visible_links(self, monkeypatch):
+        monkeypatch.setenv("OUTPUT", "rich")
+        monkeypatch.setattr(
+            "xhs_cli.commands.reading.handle_command",
+            lambda ctx, action, render, as_json, as_yaml: render({
+                "items": [
+                    {
+                        "id": "69ad061d000000002603326d",
+                        "xsec_token": "another-very-long-token",
+                        "note_card": {
+                            "title": "推荐内容",
+                            "user": {"nickname": "tester"},
+                            "interact_info": {"liked_count": "9"},
+                        },
+                    }
+                ]
+            }),
+        )
+
+        result = runner.invoke(cli, ["feed"])
+
+        assert result.exit_code == 0
+        assert "explore/69ad061d" in result.output
+        assert "another-very-long-token" not in result.output

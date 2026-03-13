@@ -9,13 +9,10 @@ import click
 
 from ..client import XhsClient
 from ..cookies import get_cookies
+from ..error_codes import error_code_for_exception
 from ..exceptions import (
-    IpBlockedError,
-    NeedVerifyError,
     NoCookieError,
     SessionExpiredError,
-    SignatureError,
-    UnsupportedOperationError,
     XhsApiError,
 )
 from ..formatter import emit_error, print_error
@@ -35,7 +32,7 @@ def _cookie_source(ctx) -> str:
 
 
 def get_client(ctx, *, force_refresh: bool = False) -> XhsClient:
-    """Get an XhsClient from the click context."""
+    """Get a local client from the click context."""
     _browser, cookies = get_cookies(_cookie_source(ctx), force_refresh=force_refresh)
     return XhsClient(cookies)
 
@@ -86,23 +83,6 @@ def handle_errors(
         return fn()
     except (XhsApiError, NoCookieError) as exc:
         exit_for_error(exc, as_json=as_json, as_yaml=as_yaml, prefix=prefix)
-
-
-def error_code_for_exception(exc: Exception) -> str:
-    """Map domain exceptions to stable structured error codes."""
-    if isinstance(exc, (NoCookieError, SessionExpiredError)):
-        return "not_authenticated"
-    if isinstance(exc, NeedVerifyError):
-        return "verification_required"
-    if isinstance(exc, IpBlockedError):
-        return "ip_blocked"
-    if isinstance(exc, SignatureError):
-        return "signature_error"
-    if isinstance(exc, UnsupportedOperationError):
-        return "unsupported_operation"
-    if isinstance(exc, XhsApiError):
-        return "api_error"
-    return "unknown_error"
 
 
 def exit_for_error(
